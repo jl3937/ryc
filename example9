@@ -1,0 +1,5 @@
+song = a 3 m;
+m = [1 2 3];
+a repeat melody = if (<= repeat 0)
+[]
+(seq melody (a (- repeat 1) melody));
