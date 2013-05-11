@@ -6,6 +6,8 @@ CFLAGS = -DYYDEBUG=1
 
 all: ryc
 
+# TODO: split ryc.l and ryc.y
+
 ryc: ryc.l ryc.y ryc.h gen_midi.h 
 	${LEX} ryc.l
 	${YACC} -d ryc.y
