@@ -38,7 +38,22 @@
 using namespace jdksmidi;
 
 #include <iostream>
+#include <algorithm>
 using namespace std;
+
+const static double o = 1e-8;
+const static double oo = 1e+8;
+const static int numChannels = 5;
+
+struct intervalType {
+  intervalType(double s, double e, int n): start(s), end(e), note(n), channel(-1) {}
+  bool operator<(const intervalType &second) const {
+    return start < second.start - o;
+  }
+  double start, end;
+  int note;
+  int channel;
+};
 
 int toSemi (struct nodeType *num) {
   double full = num->num.value;
@@ -83,71 +98,91 @@ int toSemi (struct nodeType *num) {
   return semi;
 }
 
-int play(struct nodeType *r,
-         int current_t,
-         int base,
-         int chan,
-         MIDITimedBigMessage &m,
-         MIDIMultiTrack &tracks) {
-  int t, note, velocity, trk = 1, dt = 100;
-  if (r->mld.combineType == seq) {
-    struct nodeType *mld = r;
-    while (mld && mld->mld.body) {
-      if (mld->mld.body->type == typeNote) {
-        int semi = toSemi(mld->mld.body->note.pitch);
-        double duration = mld->mld.body->note.duration->num.value;
-        if (semi != -1) {
-          m.SetTime( t = current_t );
-          m.SetNoteOn( chan, note = base + semi, velocity = 100 );
-          tracks.GetTrack( trk )->PutEvent( m );
-        }
-        t += dt * duration;
-        if (semi != -1) {
-          m.SetTime( t );
-          m.SetNoteOff( chan, note, velocity );
-          tracks.GetTrack( trk )->PutEvent( m );
-        }
-        current_t = t;
-      } else {
-        current_t = play(mld->mld.body, current_t, base, chan, m, tracks);
-      }
-      mld = mld->mld.next;
+double constructIntervals(struct nodeType *r, int base, double current,
+                          vector<intervalType> &intervals) {
+  if (r->type == typeNote) {
+    double duration = r->note.duration->num.value * 100;
+    int semi = toSemi(r->note.pitch);
+    if (semi != -1) {
+      intervals.push_back(intervalType(current,
+                                       current + duration,
+                                       base + semi));
     }
-  } else {
-    struct nodeType *mld = r;
-    int max_t = current_t;
-    while (mld && mld->mld.body) {
-      if (mld->mld.body->type == typeNote) {
-        int semi = toSemi(mld->mld.body->note.pitch);
-        double duration = mld->mld.body->note.duration->num.value;
-        if (semi != -1) {
-          m.SetTime( t = current_t );
-          m.SetNoteOn( chan, note = base + semi, velocity = 100 );
-          tracks.GetTrack( trk )->PutEvent( m );
-        }
-        t += dt * duration;
-        if (semi != -1) {
-          m.SetTime( t );
-          m.SetNoteOff( chan, note, velocity );
-          tracks.GetTrack( trk )->PutEvent( m );
-        }
-      } else {
-        t = play(mld->mld.body, current_t, base, chan, m, tracks);
-      }
-      if (max_t < t)
-        max_t = t;
-      mld = mld->mld.next;
-      chan++;
-    }
-    current_t = max_t;
+    return duration;
   }
-  return current_t;
+  if (r->mld.combineType == seq) {
+    double oldCurrent = current;
+    struct nodeType *mld = r;
+    while (mld) {
+      if (mld->mld.body)
+        current += constructIntervals(mld->mld.body, base, current, intervals);
+      mld = mld->mld.next;
+    }
+    return current - oldCurrent;
+  }
+  if (r->mld.combineType == par) {
+    struct nodeType *mld = r;
+    double maxDuration = 0;
+    while (mld) {
+      if (mld->mld.body) {
+        maxDuration = max(maxDuration,
+                          constructIntervals(mld->mld.body, base, current, intervals));
+      }
+      mld = mld->mld.next;
+    }
+    return maxDuration;
+  }
+  assert(0 && "unknown combineType");
+}
+
+double constructMidi(struct nodeType *song, int base,
+                   MIDITimedBigMessage &msg, MIDIMultiTrack &tracks) {
+  vector<intervalType> intervals;
+  double duration = constructIntervals(song, base, 0, intervals);
+
+  sort(intervals.begin(), intervals.end());
+#if 0
+  fprintf(stderr, "==============\n");
+  for (size_t i = 0; i < intervals.size(); ++i)
+    fprintf(stderr, "%.3lf %.3lf\n", intervals[i].start, intervals[i].end);
+  fprintf(stderr, "==============\n");
+#endif
+
+  double occupiedTo[numChannels];
+  for (int i = 0; i < numChannels; ++i)
+    occupiedTo[i] = 0;
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    double maxOccupiedTo = -oo;
+    int maxJ = -1;
+    for (int j = 0; j < numChannels; ++j) {
+      if (occupiedTo[j] <= intervals[i].start + o &&
+          maxOccupiedTo < occupiedTo[j] - o) {
+        maxOccupiedTo = occupiedTo[j];
+        maxJ = j;
+      }
+    }
+    assert(maxJ != -1 && "not enough channels");
+    intervals[i].channel = maxJ;
+    occupiedTo[maxJ] = intervals[i].end;
+  }
+
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    assert(intervals[i].channel != -1);
+    msg.SetTime((unsigned long)(intervals[i].start + 0.5));
+    msg.SetNoteOn(intervals[i].channel, intervals[i].note, 100);
+    tracks.GetTrack(1)->PutEvent(msg);
+    msg.SetTime((unsigned long)(intervals[i].end + 0.5));
+    msg.SetNoteOff(intervals[i].channel, intervals[i].note, 100);
+    tracks.GetTrack(1)->PutEvent(msg);
+  }
+
+  return duration;
 }
 
 // number of ticks in crotchet (1...32767)
-int gen_midi (struct nodeType *tempo,
-              struct nodeType *key,
-              struct nodeType *song)
+int gen_midi(struct nodeType *tempo,
+             struct nodeType *key,
+             struct nodeType *song)
 {
   int base = toSemi(key) - 60;
   int clks_per_beat = (int)(tempo->num.value);
@@ -161,7 +196,7 @@ int gen_midi (struct nodeType *tempo,
   
   MIDITimedBigMessage m; // the object for individual midi events
   unsigned char chan, // internal midi channel number 0...15 (named 1...16)
-  note, velocity, ctrl, val;
+  note, velocity;
   
   MIDIClockTime t; // time in midi ticks
   MIDIClockTime dt = 100; // time interval (1 second)
@@ -219,102 +254,19 @@ int gen_midi (struct nodeType *tempo,
   // META_TRACK_NAME text in tracks >= 1 Sibelius uses as instrument name (left of staves)
   tracks.GetTrack( trk )->PutTextEvent(t, META_TRACK_NAME, "Church Organ");
   
-  // we change panorama in channels 0-2
-  
-  m.SetControlChange ( chan = 0, ctrl = 0xA, val = 0 ); // channel 0 panorama = 0 at the left
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  m.SetControlChange ( chan = 1, ctrl, val = 64 ); // channel 1 panorama = 64 at the centre
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  m.SetControlChange ( chan = 2, ctrl, val = 127 ); // channel 2 panorama = 127 at the right
-  tracks.GetTrack( trk )->PutEvent( m );
-  
   // we change musical instrument in channels 0-2
   
-  m.SetProgramChange( chan = 0, val = 0 ); // channel 0 instrument 19 - Church Organ
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  m.SetProgramChange( chan = 1, val = 0 );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  m.SetProgramChange( chan = 2, val = 0 );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  m.SetProgramChange( chan = 3, val = 0 );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
+  for (int chan = 0; chan < numChannels; ++chan) {
+    m.SetProgramChange(chan, 0 ); // channel 0 instrument 19 - Church Organ
+    tracks.GetTrack(1)->PutEvent(m);
+  }
+
   // create individual midi events with the MIDITimedBigMessage and add them to a track 1
   
   t = 0;
   
-  t = play(song, t, base, 0, m, tracks);
+  t = constructMidi(song, base, m, tracks);
   
-  /*
-  // we add note 1: press and release in (dt) ticks
-  
-  m.SetTime( t );
-  m.SetNoteOn( chan = 0, note = 62, velocity = 100 );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  // after note(s) on before note(s) off: add words to music in the present situation
-  tracks.GetTrack( trk )->PutTextEvent(t, META_LYRIC_TEXT, "Left");
-  
-  m.SetTime( t += dt );
-  m.SetNoteOff( chan, note, velocity );
-  // alternative form of note off event: useful to reduce midifile size if running status is used (on default so)
-  // m.SetNoteOn( chan, note, 0 );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  // note 2
-  
-  m.SetNoteOn( chan = 1, note = 65, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  tracks.GetTrack( trk )->PutTextEvent(t, META_LYRIC_TEXT, "Centre");
-  
-  m.SetTime( t += dt );
-  m.SetNoteOff( chan, note, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  // note 3
-  
-  m.SetNoteOn( chan = 2, note = 69, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  tracks.GetTrack( trk )->PutTextEvent(t, META_LYRIC_TEXT, "Right");
-  
-  m.SetTime( t += dt );
-  m.SetNoteOff( chan, note, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  // add pause
-  
-  t += dt;
-  
-  // add chord: 3 notes simultaneous
-  
-  // press
-  m.SetTime( t );
-  m.SetNoteOn( chan = 0, note = 62, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  m.SetNoteOn( chan = 1, note = 65, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  m.SetNoteOn( chan = 2, note = 69, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  
-  tracks.GetTrack( trk )->PutTextEvent(t, META_LYRIC_TEXT, "Chord");
-  
-  // release
-  m.SetTime( t += (2*dt) );
-  m.SetNoteOff( chan = 0, note = 62, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  m.SetNoteOff( chan = 1, note = 65, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  m.SetNoteOff( chan = 2, note = 69, velocity );
-  tracks.GetTrack( trk )->PutEvent( m );
-  */
-   
   // add pause: press note with velocity = 0 equivalent to simultaneous release it
   
   t += dt;

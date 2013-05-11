@@ -5,9 +5,8 @@
   #include <stdlib.h>
   #include <math.h>
   #include <stdio.h>
-  #include "gen_midi.h"
   #include "ryc.h"
-  
+
   int yyerror (char *msg);
   int yylex(void);
   struct nodeType *num(double value);
@@ -33,6 +32,9 @@
   double timeLength(struct nodeType *p);
   void generateIntermidiateCode();
   void printTree(struct nodeType *expr);
+  int gen_midi(struct nodeType *tempo,
+               struct nodeType *key,
+               struct nodeType *song);
   
   struct nodeType *GlobalEnv = NULL;
   struct nodeType *PrimitiveEnv = NULL;

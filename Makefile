@@ -8,7 +8,7 @@ all: ryc
 
 # TODO: split ryc.l and ryc.y
 
-ryc: ryc.l ryc.y ryc.h gen_midi.h 
+ryc: ryc.l ryc.y ryc.h gen_midi.c
 	${LEX} ryc.l
 	${YACC} -d ryc.y
 	${CC} ${CFLAGS} -o ryc y.tab.c lex.yy.c gen_midi.c ${LIBS} -lm
