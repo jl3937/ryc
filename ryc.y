@@ -791,8 +791,9 @@ struct nodeType *evaluate(struct nodeType *expr, struct nodeType *env) {
         localEnv = localEnv->env.next;
       }
       
+      struct nodeType *oldEnv = env;
       struct nodeType *env = newLocalEnv;
-      while (env) {
+      while (env != oldEnv) {
         env->env.value->thunk.env = newLocalEnv;
         env = env->env.next;
       }
